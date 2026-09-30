@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ADL app icon foreground: download arrow over a gallery grid motif -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- White download arrow -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,28 L54,62 M54,62 L42,50 M54,62 L66,50"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- White base line (download tray) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M36,72 L72,72"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <!-- Small gallery grid dots (teal accent) -->
+    <path
+        android:fillColor="#80DEEA"
+        android:pathData="M32,84 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 M50,84 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 M68,84 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+</vector>

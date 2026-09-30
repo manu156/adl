@@ -1,0 +1,3 @@
+-keep class com.chaquo.python.** { *; }
+-dontwarn com.chaquo.python.**
+-keep class com.adl.** { *; }
