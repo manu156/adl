@@ -63,8 +63,8 @@ class GalleryViewModel @Inject constructor(
     fun getDownload(downloadId: Long): Flow<DownloadEntity?> =
         repository.observeById(downloadId)
 
-    fun updatePriority(downloadId: Long, visibleIndices: Set<Int>) {
-        priorityQueue.setPriorityImages(downloadId, visibleIndices)
+    fun updatePriority(downloadId: Long, priorityIndices: Collection<Int>) {
+        priorityQueue.setPriorityImages(downloadId, priorityIndices)
     }
 
     fun clearPriority(downloadId: Long) {

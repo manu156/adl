@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -42,7 +41,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -427,75 +425,6 @@ fun BrowserAddressBar(
                                     showOptionsMenu = false
                                     onClearHistory()
                                 },
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Quick chips for last 5 URLs
-            if (recentUrls.isNotEmpty()) {
-                LazyRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    items(recentUrls, key = { it.url }) { item ->
-                        val domain = try {
-                            val host = android.net.Uri.parse(item.url).host
-                            if (!host.isNullOrBlank()) host.removePrefix("www.") else item.url
-                        } catch (_: Exception) {
-                            item.url
-                        }
-                        val displayText = if (item.title.isNotBlank() && item.title != item.url) {
-                            item.title.take(24)
-                        } else {
-                            domain.take(24)
-                        }
-
-                        AssistChip(
-                            onClick = {
-                                keyboard?.hide()
-                                onNavigate(item.url)
-                            },
-                            label = {
-                                Text(
-                                    text = displayText,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.Public,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
-                            },
-                            shape = RoundedCornerShape(16.dp),
-                        )
-                    }
-
-                    item {
-                        TextButton(
-                            onClick = onClearHistory,
-                            modifier = Modifier.height(32.dp),
-                        ) {
-                            Icon(
-                                Icons.Default.DeleteSweep,
-                                contentDescription = "Clear history",
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                "Clear",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
                             )
                         }
                     }

@@ -16,8 +16,9 @@ from gallery_dl import config, job, output, exception, path, downloader
 _progress_queue: stdlib_queue.Queue = stdlib_queue.Queue()
 # Active downloads: url → thread
 _active_downloads: dict = {}
-# Priority indices: url → set of int indices
+# Priority indices: url/download_id → set/list of int indices
 _priority_indices: dict = {}
+_priority_order: dict = {}
 _priority_lock = threading.Lock()
 # Live logs by download_id: download_id → list of str
 _logs_by_download: dict = {}
@@ -72,12 +73,13 @@ def get_logs(download_id: str) -> str:
 def set_priority_indices(target: str, indices_csv: str) -> None:
     """
     Update the high-priority indices for a download (by url or download_id).
-    indices_csv: comma-separated integer indices visible in the viewport.
+    indices_csv: comma-separated ordered integer indices.
     """
     try:
-        indices = set(int(i) for i in indices_csv.split(",") if i.strip())
+        indices = [int(i) for i in str(indices_csv).split(",") if i.strip()]
         with _priority_lock:
-            _priority_indices[str(target)] = indices
+            _priority_indices[str(target)] = set(indices)
+            _priority_order[str(target)] = indices
     except Exception:
         pass
 
@@ -347,12 +349,25 @@ def _run_download(
                         if not pending_tasks:
                             continue
 
-                        # Check priority indices (viewport visible images)
+                        # Check priority indices (viewport visible images, ordered window)
                         with _priority_lock:
                             prios = _priority_indices.get(str(url), set()) | _priority_indices.get(str(download_id), set())
+                            prio_order = _priority_order.get(str(download_id), []) or _priority_order.get(str(url), [])
 
                         best_i = 0
-                        if prios:
+                        if prio_order:
+                            found = False
+                            for target_prio in prio_order:
+                                for i, t in enumerate(pending_tasks):
+                                    t_idx = t[0]
+                                    # Match exact index (both 1-based and 0-based conversions)
+                                    if t_idx == target_prio or (t_idx - 1) == target_prio or (t_idx + 1) == target_prio:
+                                        best_i = i
+                                        found = True
+                                        break
+                                if found:
+                                    break
+                        elif prios:
                             for i, t in enumerate(pending_tasks):
                                 t_idx = t[0]
                                 if t_idx in prios or (t_idx - 1) in prios:

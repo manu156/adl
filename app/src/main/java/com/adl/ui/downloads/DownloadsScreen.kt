@@ -43,6 +43,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -71,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -246,201 +248,267 @@ fun DownloadItem(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         shape = RoundedCornerShape(12.dp),
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Thumbnail
-            if (download.thumbnailPath != null) {
-                AsyncImage(
-                    model = download.thumbnailPath,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(8.dp)),
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = when (download.status) {
-                            DownloadStatus.PAUSED -> Icons.Default.PauseCircle
-                            DownloadStatus.FAILED -> Icons.Default.Error
-                            else -> Icons.Default.Download
-                        },
+            // Top Section: Thumbnail + Details
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+            ) {
+                // Thumbnail
+                if (download.thumbnailPath != null) {
+                    AsyncImage(
+                        model = download.thumbnailPath,
                         contentDescription = null,
-                        tint = when (download.status) {
-                            DownloadStatus.PAUSED -> Color(0xFFFFA000)
-                            DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.primary
-                        },
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(8.dp)),
                     )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = when (download.status) {
+                                DownloadStatus.PAUSED -> Icons.Default.PauseCircle
+                                DownloadStatus.FAILED -> Icons.Default.Error
+                                else -> Icons.Default.Download
+                            },
+                            contentDescription = null,
+                            tint = when (download.status) {
+                                DownloadStatus.PAUSED -> Color(0xFFFFA000)
+                                DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(28.dp),
+                        )
+                    }
                 }
-            }
 
-            Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(12.dp))
 
-            // Info
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = download.galleryName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = download.siteName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = download.url,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.clickable(onClick = onOpenInBrowser),
-                )
+                // Info Column
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = download.galleryName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = download.siteName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = download.url,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable(onClick = onOpenInBrowser),
+                    )
 
-                Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(6.dp))
 
-                when (download.status) {
-                    DownloadStatus.IN_PROGRESS -> {
-                        if (download.totalImages > 0) {
-                            LinearProgressIndicator(
-                                progress = { download.downloadedImages.toFloat() / download.totalImages },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                    when (download.status) {
+                        DownloadStatus.IN_PROGRESS -> {
+                            if (download.totalImages > 0) {
+                                LinearProgressIndicator(
+                                    progress = { download.downloadedImages.toFloat() / download.totalImages },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "${download.downloadedImages} / ${download.totalImages} images",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = if (download.downloadedImages > 0) "${download.downloadedImages} images (downloading...)" else "Starting engine...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        DownloadStatus.PENDING -> {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Spacer(Modifier.height(2.dp))
                             Text(
-                                text = "${download.downloadedImages} / ${download.totalImages} images",
+                                text = "Pending...",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                        } else {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        DownloadStatus.PAUSED -> {
                             Text(
-                                text = if (download.downloadedImages > 0) "${download.downloadedImages} images (downloading...)" else "Starting engine...",
+                                text = "Paused (${download.downloadedImages} images saved)",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = Color(0xFFFFA000),
                             )
                         }
-                    }
-                    DownloadStatus.PENDING -> {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text(
-                            text = "Pending...",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    DownloadStatus.PAUSED -> {
-                        Text(
-                            text = "Paused (${download.downloadedImages} images saved)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFFFA000),
-                        )
-                    }
-                    DownloadStatus.FAILED -> {
-                        Text(
-                            text = "Failed (tap to view error logs)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    DownloadStatus.COMPLETED -> {
-                        Text(
-                            text = "${download.downloadedImages} images downloaded",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    DownloadStatus.CANCELLED -> {
-                        Text(
-                            text = "Cancelled",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        DownloadStatus.FAILED -> {
+                            Text(
+                                text = "Failed (tap to view error logs)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        DownloadStatus.COMPLETED -> {
+                            Text(
+                                text = "${download.downloadedImages} images downloaded",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        DownloadStatus.CANCELLED -> {
+                            Text(
+                                text = "Cancelled",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
                 }
             }
 
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Spacer(Modifier.height(4.dp))
 
-            // Action buttons row
+            // Bottom Actions Row: Status pill on left, Action buttons on right
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                // Pause / Continue button
-                when (download.status) {
-                    DownloadStatus.IN_PROGRESS, DownloadStatus.PENDING -> {
-                        IconButton(onClick = onPause, modifier = Modifier.size(32.dp)) {
-                            Icon(
-                                Icons.Default.Pause,
-                                contentDescription = "Pause",
-                                tint = Color(0xFFFFA000),
-                                modifier = Modifier.size(20.dp),
-                            )
+                // Status indicator pill
+                val (statusText, statusBgColor, statusFgColor) = when (download.status) {
+                    DownloadStatus.IN_PROGRESS -> Triple(
+                        if (download.totalImages > 0) "${download.downloadedImages}/${download.totalImages}" else "Downloading",
+                        MaterialTheme.colorScheme.primaryContainer,
+                        MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
+                    DownloadStatus.PENDING -> Triple(
+                        "Pending",
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    DownloadStatus.PAUSED -> Triple(
+                        "Paused",
+                        Color(0xFFFFF3E0),
+                        Color(0xFFE65100),
+                    )
+                    DownloadStatus.FAILED -> Triple(
+                        "Failed",
+                        MaterialTheme.colorScheme.errorContainer,
+                        MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    DownloadStatus.COMPLETED -> Triple(
+                        "Done",
+                        Color(0xFFE8F5E9),
+                        Color(0xFF2E7D32),
+                    )
+                    DownloadStatus.CANCELLED -> Triple(
+                        "Cancelled",
+                        MaterialTheme.colorScheme.errorContainer,
+                        MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = statusBgColor,
+                ) {
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusFgColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                }
+
+                // Action buttons row
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    // Pause / Continue button
+                    when (download.status) {
+                        DownloadStatus.IN_PROGRESS, DownloadStatus.PENDING -> {
+                            IconButton(onClick = onPause, modifier = Modifier.size(36.dp)) {
+                                Icon(
+                                    Icons.Default.Pause,
+                                    contentDescription = "Pause",
+                                    tint = Color(0xFFFFA000),
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         }
-                    }
-                    DownloadStatus.PAUSED, DownloadStatus.FAILED, DownloadStatus.CANCELLED -> {
-                        IconButton(onClick = onResume, modifier = Modifier.size(32.dp)) {
-                            Icon(
-                                Icons.Default.PlayArrow,
-                                contentDescription = "Continue",
-                                tint = Color(0xFF4CAF50),
-                                modifier = Modifier.size(20.dp),
-                            )
+                        DownloadStatus.PAUSED, DownloadStatus.FAILED, DownloadStatus.CANCELLED -> {
+                            IconButton(onClick = onResume, modifier = Modifier.size(36.dp)) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "Continue",
+                                    tint = Color(0xFF4CAF50),
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         }
+                        DownloadStatus.COMPLETED -> Unit
                     }
-                    DownloadStatus.COMPLETED -> Unit
-                }
 
-                // Delete button
-                IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Default.DeleteOutline,
-                        contentDescription = "Delete",
-                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
+                    // Open in Browser button
+                    IconButton(onClick = onOpenInBrowser, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.Public,
+                            contentDescription = "Open in browser",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
 
-                // Logs button
-                IconButton(onClick = onViewLogs, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Default.Terminal,
-                        contentDescription = "View logs",
-                        tint = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
+                    // Open Gallery button
+                    IconButton(onClick = onOpen, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = "Open gallery",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
 
-                // Open in Browser button
-                IconButton(onClick = onOpenInBrowser, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.Default.Public,
-                        contentDescription = "Open in browser",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
+                    // Logs button
+                    IconButton(onClick = onViewLogs, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.Terminal,
+                            contentDescription = "View logs",
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
 
-                // Open Gallery button
-                IconButton(onClick = onOpen, modifier = Modifier.size(32.dp)) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.OpenInNew,
-                        contentDescription = "Open gallery",
-                        modifier = Modifier.size(20.dp),
-                    )
+                    // Delete button
+                    IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Delete",
+                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
         }

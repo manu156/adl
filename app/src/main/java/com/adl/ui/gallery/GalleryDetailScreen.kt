@@ -151,7 +151,7 @@ fun GalleryDetailScreen(
             .collect { firstIndex ->
                 val lastIndex = minOf(firstIndex + 15, totalSlots - 1)
                 if (lastIndex >= firstIndex) {
-                    val visibleRange = (firstIndex..lastIndex).toSet()
+                    val visibleRange = (firstIndex..lastIndex).toList()
                     viewModel.updatePriority(downloadId, visibleRange)
                 }
             }
@@ -348,12 +348,19 @@ fun GalleryDetailScreen(
                     pageCount = { activeImages.size },
                 )
 
-                LaunchedEffect(inScreenPagerState.currentPage, activeImages) {
+                LaunchedEffect(inScreenPagerState.currentPage, activeImages.size) {
                     val curr = inScreenPagerState.currentPage
                     val currIdx = activeImages.getOrNull(curr)?.index ?: curr
-                    val nextIdx = activeImages.getOrNull(curr + 1)?.index ?: (curr + 1)
-                    val prevIdx = activeImages.getOrNull(curr - 1)?.index ?: (curr - 1)
-                    viewModel.updatePriority(downloadId, setOf(currIdx, nextIdx, prevIdx))
+                    val priorityWindow = listOf(
+                        currIdx,
+                        currIdx + 1,
+                        currIdx + 2,
+                        currIdx + 3,
+                        currIdx + 4,
+                        currIdx + 5,
+                        currIdx - 1,
+                    ).filter { it >= 0 }.distinct()
+                    viewModel.updatePriority(downloadId, priorityWindow)
                 }
 
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -430,15 +437,17 @@ fun GalleryDetailScreen(
                                 GalleryImageCell(
                                     image = image,
                                     onClick = {
-                                        val indexInActive = activeImages.indexOfFirst { it.id == image.id }
-                                        selectedImageIndex = if (indexInActive >= 0) indexInActive else 0
+                                        selectedImageIndex = slotIndex
                                     },
                                 )
                             } else {
-                                // Dummy / placeholder thumbnail for to-be-downloaded item
+                                // Dummy / placeholder thumbnail for to-be-downloaded item (clickable to open in fullscreen)
                                 PendingImageCell(
                                     index = slotIndex + 1,
                                     isActivelyDownloading = isDownloading && (slotIndex in images.size..(images.size + 2) || (totalImages > 0 && slotIndex == imageByIndex.size)),
+                                    onClick = {
+                                        selectedImageIndex = slotIndex
+                                    },
                                 )
                             }
                         }
@@ -450,9 +459,13 @@ fun GalleryDetailScreen(
 
     // Full-screen image viewer with Up / Down swipe navigation
     selectedImageIndex?.let { initialIndex ->
+        val totalCount = if (selectedSubfolder != null) activeImages.size else totalSlots
         FullScreenImageViewer(
-            images = activeImages,
+            totalCount = totalCount,
+            imageByIndex = imageByIndex,
+            imagesList = activeImages,
             initialIndex = initialIndex,
+            isDownloading = isDownloading,
             onDismiss = { selectedImageIndex = null },
             onPriorityUpdate = { priorityRange ->
                 viewModel.updatePriority(downloadId, priorityRange)
@@ -502,13 +515,15 @@ fun GalleryImageCell(
 fun PendingImageCell(
     index: Int,
     isActivelyDownloading: Boolean,
+    onClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
         modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -570,36 +585,45 @@ private fun findWindow(view: View): Window? {
 
 /**
  * Full-screen image viewer supporting Up / Down vertical swipe gestures
- * to navigate through previous and next images with smooth snap animations,
- * and tap-to-toggle immersive mode (like Google Photos / gallery apps).
+ * across all gallery images (both downloaded and not yet downloaded).
+ *
+ * When an image is opened:
+ * - Prioritizes the current viewed image, plus a rolling window of 1 back and 5 forward.
+ * - Displays a live placeholder with progress spinner for pending images.
+ * - Supports tap-to-toggle edge-to-edge immersive mode.
  */
 @Composable
 fun FullScreenImageViewer(
-    images: List<ImageEntity>,
+    totalCount: Int,
+    imageByIndex: Map<Int, ImageEntity>,
+    imagesList: List<ImageEntity>,
     initialIndex: Int,
+    isDownloading: Boolean,
     onDismiss: () -> Unit,
-    onPriorityUpdate: (Set<Int>) -> Unit,
+    onPriorityUpdate: (List<Int>) -> Unit,
 ) {
-    if (images.isEmpty()) {
-        onDismiss()
-        return
-    }
-
-    val safeInitialPage = initialIndex.coerceIn(0, images.size - 1)
+    val safeTotalCount = maxOf(totalCount, imagesList.size, 1)
+    val safeInitialPage = initialIndex.coerceIn(0, safeTotalCount - 1)
     val pagerState = rememberPagerState(
         initialPage = safeInitialPage,
-        pageCount = { images.size },
+        pageCount = { safeTotalCount },
     )
     val scope = rememberCoroutineScope()
     var isImmersive by remember { mutableStateOf(false) }
 
-    // Prioritize active image and neighbors for downloading
-    LaunchedEffect(pagerState.currentPage, images) {
+    // Prioritize viewing image + rolling window of 1 back and 5 forward
+    LaunchedEffect(pagerState.currentPage, safeTotalCount) {
         val curr = pagerState.currentPage
-        val currIdx = images.getOrNull(curr)?.index ?: curr
-        val nextIdx = images.getOrNull(curr + 1)?.index ?: (curr + 1)
-        val prevIdx = images.getOrNull(curr - 1)?.index ?: (curr - 1)
-        onPriorityUpdate(setOf(currIdx, nextIdx, prevIdx))
+        val priorityWindow = listOf(
+            curr,
+            curr + 1,
+            curr + 2,
+            curr + 3,
+            curr + 4,
+            curr + 5,
+            curr - 1,
+        ).filter { it in 0 until safeTotalCount }.distinct()
+        onPriorityUpdate(priorityWindow)
     }
 
     Dialog(
@@ -657,9 +681,21 @@ fun FullScreenImageViewer(
             VerticalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
-                key = { page -> images.getOrNull(page)?.let { "${it.id}_$page" } ?: "page_$page" },
+                key = { page ->
+                    val img = if (imagesList.size == safeTotalCount && safeTotalCount > 0) {
+                        imagesList.getOrNull(page)
+                    } else {
+                        imageByIndex[page] ?: imagesList.getOrNull(page)
+                    }
+                    img?.let { "${it.id}_$page" } ?: "slot_$page"
+                },
             ) { page ->
-                val image = images.getOrNull(page)
+                val image = if (imagesList.size == safeTotalCount && safeTotalCount > 0) {
+                    imagesList.getOrNull(page)
+                } else {
+                    imageByIndex[page] ?: imagesList.getOrNull(page)
+                }
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -679,19 +715,34 @@ fun FullScreenImageViewer(
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
+                        // Image not yet downloaded: show informative loading and priority indicator
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(24.dp),
                         ) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(36.dp),
-                                color = Color.White,
+                                modifier = Modifier.size(44.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 3.dp,
                             )
-                            Spacer(Modifier.height(12.dp))
+                            Spacer(Modifier.height(16.dp))
                             Text(
-                                text = "Loading image #${page + 1}...",
+                                text = "Downloading image #${page + 1}...",
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = if (isDownloading) "Prioritized in download queue" else "Waiting for download to resume",
                                 color = Color.LightGray,
                                 style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "Swipe \u2191\u2193 to browse other images",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
                             )
                         }
                     }
@@ -699,7 +750,12 @@ fun FullScreenImageViewer(
             }
 
             // ── Top Action Bar Overlay ──────────────────────────────────────────
-            val currentImage = images.getOrNull(pagerState.currentPage)
+            val currentImage = if (imagesList.size == safeTotalCount && safeTotalCount > 0) {
+                imagesList.getOrNull(pagerState.currentPage)
+            } else {
+                imageByIndex[pagerState.currentPage] ?: imagesList.getOrNull(pagerState.currentPage)
+            }
+
             AnimatedVisibility(
                 visible = !isImmersive,
                 enter = fadeIn() + slideInVertically { -it },
@@ -732,14 +788,14 @@ fun FullScreenImageViewer(
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Text(
-                            text = currentImage?.fileName ?: "Image #${pagerState.currentPage + 1}",
+                            text = currentImage?.fileName?.takeIf { it.isNotBlank() } ?: "Image #${pagerState.currentPage + 1}",
                             color = Color.White,
                             style = MaterialTheme.typography.bodyMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "${pagerState.currentPage + 1} / ${images.size} (Swipe \u2191\u2193)",
+                            text = "${pagerState.currentPage + 1} / $safeTotalCount (Swipe \u2191\u2193)",
                             color = Color.LightGray,
                             style = MaterialTheme.typography.labelSmall,
                         )
@@ -774,18 +830,18 @@ fun FullScreenImageViewer(
 
                         IconButton(
                             onClick = {
-                                if (pagerState.currentPage < images.size - 1) {
+                                if (pagerState.currentPage < safeTotalCount - 1) {
                                     scope.launch {
                                         pagerState.animateScrollToPage(pagerState.currentPage + 1)
                                     }
                                 }
                             },
-                            enabled = pagerState.currentPage < images.size - 1,
+                            enabled = pagerState.currentPage < safeTotalCount - 1,
                         ) {
                             Icon(
                                 Icons.Default.KeyboardArrowDown,
                                 contentDescription = "Next image",
-                                tint = if (pagerState.currentPage < images.size - 1) Color.White else Color.DarkGray,
+                                tint = if (pagerState.currentPage < safeTotalCount - 1) Color.White else Color.DarkGray,
                             )
                         }
                     }
