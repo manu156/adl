@@ -130,6 +130,11 @@ class DownloadService : Service() {
         val sleepStr = settingsRepository.sleepInterval.firstOrNull() ?: "0.5"
         val sleepSec = sleepStr.toDoubleOrNull() ?: 0.5
 
+        // Clear any stale cancellation flags / leftover queue events from a previous run
+        // This prevents the "stuck launching gallery-dl engine" bug after service restarts
+        downloadLogRepository.addLog(downloadId, "[INFO] Resetting download state...")
+        wrapper.callAttr("reset_state", downloadId.toString(), url)
+
         // Start the Python download
         downloadLogRepository.addLog(downloadId, "[INFO] Launching gallery-dl engine (threads: $threads, sleep: ${sleepSec}s)...")
         wrapper.callAttr(
@@ -147,6 +152,16 @@ class DownloadService : Service() {
         var imageIndex = 0
         var isComplete = false
         var lastReportedTotal = 0
+        // With parallel downloads, workers complete out-of-order so image_index values
+        // can arrive as e.g. 30→15→6. We track the max seen so downloadedImages only
+        // ever increases, not regresses to a lower value.
+        var maxDownloadedIndex = 0
+        // Also count total images received (including failed ones) for the progress bar
+        var receivedImageCount = 0
+        // Watchdog: if no event arrives within 5 minutes, treat as error to unblock the service
+        val pollDeadlineMs = 5 * 60 * 1000L
+        var lastEventMs = System.currentTimeMillis()
+
         while (!isComplete) {
             // Update priority if gallery is being viewed
             if (priorityQueue.isBeingViewed(downloadId)) {
@@ -155,7 +170,19 @@ class DownloadService : Service() {
             }
 
             val eventJson = wrapper.callAttr("poll_event", 0.2)?.toString()
-                ?: continue
+            if (eventJson == null) {
+                // Check watchdog timeout
+                if (System.currentTimeMillis() - lastEventMs > pollDeadlineMs) {
+                    val msg = "Download timed out — no events received for 5 minutes"
+                    Log.e(TAG, msg)
+                    downloadLogRepository.addLog(downloadId, "[ERROR] $msg")
+                    repository.updateProgress(downloadId, DownloadStatus.FAILED, maxDownloadedIndex)
+                    showErrorNotification(notifId, url, msg)
+                    isComplete = true
+                }
+                continue
+            }
+            lastEventMs = System.currentTimeMillis()
 
             try {
                 val event = JSONObject(eventJson)
@@ -180,20 +207,27 @@ class DownloadService : Service() {
                     "image" -> {
                         imageIndex = event.getInt("image_index")
                         val filepath = event.optString("filepath", "")
+                        receivedImageCount++
 
-                        if (imageIndex > lastReportedTotal && lastReportedTotal > 0) {
-                            lastReportedTotal = imageIndex
-                            repository.setTotalImages(downloadId, imageIndex)
+                        // Only update the progress counter upward — parallel workers
+                        // complete out-of-order so imageIndex can go 30→15→6 etc.
+                        // Use receivedImageCount (monotonically increasing) for the bar
+                        // and maxDownloadedIndex (highest seq index seen) for display.
+                        if (imageIndex > maxDownloadedIndex) maxDownloadedIndex = imageIndex
+                        val displayCount = maxOf(receivedImageCount, maxDownloadedIndex)
+
+                        if (displayCount > lastReportedTotal && lastReportedTotal > 0) {
+                            lastReportedTotal = displayCount
+                            repository.setTotalImages(downloadId, displayCount)
                         }
 
-                        downloadLogRepository.addLog(downloadId, "[INFO] Saved image #$imageIndex: ${filepath.substringAfterLast('/')}")
-                        repository.updateProgress(downloadId, DownloadStatus.IN_PROGRESS, imageIndex)
                         if (filepath.isNotBlank()) {
+                            downloadLogRepository.addLog(downloadId, "[INFO] Saved image #$imageIndex: ${filepath.substringAfterLast('/')}")
                             repository.saveDownloadedImage(downloadId, imageIndex - 1, filepath)
-                            // Use first image as thumbnail
                             if (imageIndex == 1) repository.setThumbnail(downloadId, filepath)
                         }
-                        updateNotification(notifId, downloadId, url, imageIndex, -1)
+                        repository.updateProgress(downloadId, DownloadStatus.IN_PROGRESS, displayCount)
+                        updateNotification(notifId, downloadId, url, displayCount, lastReportedTotal)
                     }
                     "complete" -> {
                         val total = event.optInt("total_images", imageIndex)

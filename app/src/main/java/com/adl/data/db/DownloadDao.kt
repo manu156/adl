@@ -31,7 +31,7 @@ interface DownloadDao {
     @Upsert
     suspend fun upsertDownload(entity: DownloadEntity): Long
 
-    @Query("UPDATE downloads SET status = :status, downloadedImages = :done, updatedAt = :now WHERE id = :id")
+    @Query("UPDATE downloads SET status = :status, downloadedImages = MAX(downloadedImages, :done), updatedAt = :now WHERE id = :id")
     suspend fun updateProgress(
         id: Long,
         status: DownloadStatus,
@@ -62,6 +62,12 @@ interface DownloadDao {
 
     @Query("SELECT * FROM images WHERE downloadId = :downloadId AND isDownloaded = 1 ORDER BY `index` ASC")
     fun observeDownloadedImages(downloadId: Long): Flow<List<ImageEntity>>
+
+    @Query("SELECT * FROM images")
+    suspend fun getAllImages(): List<ImageEntity>
+
+    @Query("SELECT * FROM downloads")
+    suspend fun getAllDownloads(): List<DownloadEntity>
 
     @Query("SELECT * FROM images WHERE isDownloaded = 1 AND filePath != '' ORDER BY downloadedAt DESC")
     fun observeAllDownloadedImages(): Flow<List<ImageEntity>>

@@ -379,7 +379,7 @@ fun GalleryDetailScreen(
                         ) {
                             if (image != null && image.isDownloaded && image.filePath.isNotBlank()) {
                                 AsyncImage(
-                                    model = image.filePath,
+                                    model = java.io.File(image.filePath),
                                     contentDescription = image.fileName,
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier.fillMaxSize(),
@@ -489,7 +489,7 @@ fun GalleryImageCell(
         contentAlignment = Alignment.Center,
     ) {
         AsyncImage(
-            model = image.filePath,
+            model = java.io.File(image.filePath),
             contentDescription = image.fileName,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
@@ -709,7 +709,7 @@ fun FullScreenImageViewer(
                 ) {
                     if (image != null && image.isDownloaded && image.filePath.isNotBlank()) {
                         AsyncImage(
-                            model = image.filePath,
+                            model = java.io.File(image.filePath),
                             contentDescription = image.fileName,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxSize(),

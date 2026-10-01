@@ -16,6 +16,8 @@ from gallery_dl import config, job, output, exception, path, downloader
 _progress_queue: stdlib_queue.Queue = stdlib_queue.Queue()
 # Active downloads: url → thread
 _active_downloads: dict = {}
+# Active download_id → thread mapping (parallel to _active_downloads)
+_active_download_ids: dict = {}
 # Priority indices: url/download_id → set/list of int indices
 _priority_indices: dict = {}
 _priority_order: dict = {}
@@ -25,6 +27,35 @@ _logs_by_download: dict = {}
 _logs_lock = threading.Lock()
 # Cancelled / paused download ids or urls
 _cancelled_ids: set = set()
+
+
+def reset_state(download_id: str, url: str) -> None:
+    """
+    Clear all stale state for a download before starting it.
+    Drains any leftover events from the queue that belong to this download_id
+    so a previous run's cancelled/error events don't confuse the new download.
+    """
+    global _progress_queue
+    with _logs_lock:
+        _cancelled_ids.discard(str(download_id))
+        _cancelled_ids.discard(str(url))
+
+    # Drain stale events for this download_id from the queue
+    drained = []
+    try:
+        while True:
+            event = _progress_queue.get_nowait()
+            if event.get("download_id") != str(download_id):
+                drained.append(event)  # keep events for other downloads
+    except stdlib_queue.Empty:
+        pass
+    for evt in drained:
+        _progress_queue.put(evt)
+
+    # Clean up any dead threads
+    _active_downloads.pop(url, None)
+    _active_download_ids.pop(str(download_id), None)
+
 
 
 def get_progress_queue() -> stdlib_queue.Queue:
@@ -134,10 +165,18 @@ def start_download(
                 "url": url,
                 "message": f"{str(e)}: {tb}",
             })
+        finally:
+            _active_downloads.pop(url, None)
+            _active_download_ids.pop(str(download_id), None)
+
+    # Clear stale state from any previous run with this id/url
+    reset_state(str(download_id), url)
 
     t = threading.Thread(target=_run, daemon=True, name=f"gdl-{download_id}")
     _active_downloads[url] = t
+    _active_download_ids[str(download_id)] = t
     t.start()
+
 
 
 def _run_download(
@@ -183,6 +222,10 @@ def _run_download(
     count_lock = threading.Lock()
     seen_subgalleries = set()
     total_accumulated = [0]
+    # Tracks how many workers are actively executing a download (not idle/waiting)
+    inflight_count = [0]
+    inflight_lock = threading.Lock()
+
 
     def _report_subgallery_or_total(job_instance, kwdict):
         tot = kwdict.get("count") or kwdict.get("total") or kwdict.get("post_count")
@@ -380,10 +423,24 @@ def _run_download(
                     if task is None:
                         continue
 
+                    # Mark as in-flight BEFORE dequeuing so drain loop sees it
+                    with inflight_lock:
+                        inflight_count[0] += 1
+
                     idx, u_item, kw = task
                     try:
                         with _logs_lock:
                             if str(download_id) in _cancelled_ids or str(url) in _cancelled_ids:
+                                # Still emit so the slot is not silently stuck
+                                _progress_queue.put({
+                                    "type": "image",
+                                    "download_id": download_id,
+                                    "url": url,
+                                    "image_index": idx,
+                                    "filepath": "",
+                                })
+                                with count_lock:
+                                    image_count[0] += 1
                                 continue
 
                         if sleep_val > 0:
@@ -425,38 +482,73 @@ def _run_download(
                             fname = os.path.basename(tp.temppath) if tp.temppath else os.path.basename(tp.realpath)
                             tp.temppath = os.path.join(tp.realdirectory, fname)
 
-                        # Wrap tp.open to guarantee absolute temppath and existing parent directory
-                        orig_tp_open = tp.open
-                        def _safe_tp_open(mode="wb"):
-                            if not os.path.isabs(tp.temppath):
-                                tp.temppath = os.path.join(tp.realdirectory, os.path.basename(tp.temppath))
-                            os.makedirs(os.path.dirname(tp.temppath), exist_ok=True)
-                            return orig_tp_open(mode)
-                        tp.open = _safe_tp_open
+                        # Use factory functions to avoid closure capture bugs across loop iterations
+                        def _make_safe_open(bound_tp):
+                            orig = bound_tp.open
+                            def _safe_open(mode="wb"):
+                                if not os.path.isabs(bound_tp.temppath):
+                                    bound_tp.temppath = os.path.join(bound_tp.realdirectory, os.path.basename(bound_tp.temppath))
+                                os.makedirs(os.path.dirname(bound_tp.temppath), exist_ok=True)
+                                return orig(mode)
+                            return _safe_open
 
-                        # Wrap tp.finalize to guarantee valid absolute destination
-                        orig_tp_finalize = tp.finalize
-                        def _safe_tp_finalize():
-                            if not os.path.isabs(tp.temppath):
-                                tp.temppath = os.path.join(tp.realdirectory, os.path.basename(tp.temppath))
-                            if not os.path.isabs(tp.realpath):
-                                tp.realpath = os.path.join(tp.realdirectory, os.path.basename(tp.realpath))
-                            os.makedirs(os.path.dirname(tp.realpath), exist_ok=True)
-                            return orig_tp_finalize()
-                        tp.finalize = _safe_tp_finalize
+                        def _make_safe_finalize(bound_tp):
+                            orig = bound_tp.finalize
+                            def _safe_finalize():
+                                if not os.path.isabs(bound_tp.temppath):
+                                    bound_tp.temppath = os.path.join(bound_tp.realdirectory, os.path.basename(bound_tp.temppath))
+                                if not os.path.isabs(bound_tp.realpath):
+                                    bound_tp.realpath = os.path.join(bound_tp.realdirectory, os.path.basename(bound_tp.realpath))
+                                os.makedirs(os.path.dirname(bound_tp.realpath), exist_ok=True)
+                                return orig()
+                            return _safe_finalize
+
+                        tp.open = _make_safe_open(tp)
+                        tp.finalize = _make_safe_finalize(tp)
 
                         filepath = ""
+
+                        # tp.exists() check — only trust it if the resolved path is a real file.
+                        # tp.exists() can return True with an empty/relative realpath (false-positive),
+                        # which would leave filepath="" and the image stuck as "downloading".
                         if tp.exists():
-                            filepath = str(tp.realpath or tp.path)
-                        else:
+                            candidate = str(tp.realpath or tp.path or "")
+                            if candidate and os.path.isabs(candidate) and os.path.isfile(candidate):
+                                filepath = candidate
+                                append_log(download_id, f"[Worker-{w_id}] Image #{idx} already on disk, skipping download")
+
+                        if not filepath:
                             scheme = u_item[:u_item.find(":")] if ":" in u_item else "https"
                             dl_cls = downloader.find(scheme)
-                            if dl_cls:
+                            if dl_cls is None:
+                                append_log(download_id,
+                                    f"[Worker-{w_id}] No downloader found for scheme '{scheme}' on image #{idx} — skipping",
+                                    "WARN")
+                            else:
+                                # Wrap in a thread with a 2-minute per-image timeout.
+                                # A hung HTTP connection would otherwise block this worker
+                                # forever, preventing all subsequent queued images from running.
+                                import concurrent.futures as _cf
                                 thread_dl = dl_cls(j)
-                                success = thread_dl.download(u_item, tp)
+                                with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"gdl-dl-{w_id}") as _ex:
+                                    _fut = _ex.submit(thread_dl.download, u_item, tp)
+                                    try:
+                                        success = _fut.result(timeout=120)
+                                    except _cf.TimeoutError:
+                                        append_log(download_id,
+                                            f"[Worker-{w_id}] Timeout (120s) downloading image #{idx}: {u_item}",
+                                            "WARN")
+                                        success = False
+                                    except Exception as _dl_err:
+                                        append_log(download_id,
+                                            f"[Worker-{w_id}] Downloader error on image #{idx}: {_dl_err}",
+                                            "WARN")
+                                        success = False
                                 if success:
                                     tp.finalize()
-                                    filepath = str(tp.realpath or tp.path)
+                                    candidate = str(tp.realpath or tp.path or "")
+                                    if candidate and os.path.isabs(candidate):
+                                        filepath = candidate
 
                         if not filepath and hasattr(j, "pathfmt") and j.pathfmt:
                             filepath = str(getattr(j.pathfmt, "realpath", "") or getattr(j.pathfmt, "path", "") or "")
@@ -479,6 +571,23 @@ def _run_download(
                     except Exception as ex:
                         tb = traceback.format_exc()
                         append_log(download_id, f"Worker-{w_id} error downloading #{idx}: {ex}\n{tb}", "WARN")
+                        # Always emit even on exception — a missing event would leave the
+                        # slot stuck as "downloading" and the final count would be wrong.
+                        with count_lock:
+                            image_count[0] += 1
+                        _progress_queue.put({
+                            "type": "image",
+                            "download_id": download_id,
+                            "url": url,
+                            "image_index": idx,
+                            "filepath": "",
+                        })
+                    finally:
+                        # Always decrement inflight and wake the drain loop
+                        with inflight_lock:
+                            inflight_count[0] -= 1
+                        with task_cv:
+                            task_cv.notify_all()
 
             for i in range(num_threads):
                 t = threading.Thread(target=_worker_loop, args=(i + 1,), daemon=True, name=f"gdl-w-{download_id}-{i}")
@@ -488,18 +597,25 @@ def _run_download(
         status = j.run()
 
         if num_threads > 1:
-            # Wait for all pending tasks to be drained by workers
+            # Drain: wait until ALL tasks are dequeued AND all in-flight workers finish.
+            # Checking only pending_tasks is wrong — workers dequeue before they download,
+            # so pending_tasks can be empty while 20+ downloads are still in progress.
             while True:
+                with inflight_lock:
+                    current_inflight = inflight_count[0]
                 with task_cv:
-                    if not pending_tasks or stop_workers.is_set():
-                        break
+                    current_pending = len(pending_tasks)
+                if (current_pending == 0 and current_inflight == 0) or stop_workers.is_set():
+                    break
+                with task_cv:
                     task_cv.wait(timeout=0.3)
 
             stop_workers.set()
             with task_cv:
                 task_cv.notify_all()
             for t in worker_threads:
-                t.join(timeout=3.0)
+                # Allow generous time for any last in-flight HTTP download to complete
+                t.join(timeout=120.0)
 
         append_log(download_id, f"Execution completed with exit code: {status}, images downloaded: {image_count[0]}")
 
@@ -569,16 +685,16 @@ def _run_download(
 
 
 def cancel_download(target: str) -> bool:
-    """Request cancellation or pause by download_id or url."""
+    """
+    Request cancellation or pause by download_id or url.
+    Only sets the cancellation flag — the running download thread will detect
+    it and emit the 'cancelled' event itself. We must NOT push a 'cancelled'
+    event here because it would be consumed by the next download's polling loop.
+    """
     target_str = str(target)
     with _logs_lock:
         _cancelled_ids.add(target_str)
     append_log(target_str, "Pause/Cancel signal received", "WARN")
-    _progress_queue.put({
-        "type": "cancelled",
-        "download_id": target_str,
-        "url": target_str,
-    })
     return True
 
 

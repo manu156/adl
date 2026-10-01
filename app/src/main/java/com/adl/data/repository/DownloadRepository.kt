@@ -93,5 +93,27 @@ class DownloadRepository @Inject constructor(
         } catch (_: Exception) {}
     }
 
+    /**
+     * Called once on app startup to fix downloads left in a broken state after
+     * a service/process kill (e.g. app swiped away mid-download).
+     *
+     * Only touches IN_PROGRESS entries — moves them to PAUSED with the correct
+     * count so the user can resume. COMPLETED downloads are never touched here.
+     */
+    suspend fun fixStuckDownloads() {
+        try {
+            val allDownloads = dao.getAllDownloads()
+            for (download in allDownloads) {
+                if (download.status == DownloadStatus.IN_PROGRESS) {
+                    // Count actually-saved images from the image table
+                    val savedCount = dao.countDownloadedImages(download.id)
+                    // Use whichever is higher: the image table count or what the DB header says
+                    val correctCount = maxOf(savedCount, download.downloadedImages)
+                    dao.updateProgress(download.id, DownloadStatus.PAUSED, correctCount)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     suspend fun findByUrl(url: String): DownloadEntity? = dao.findByUrl(url)
 }

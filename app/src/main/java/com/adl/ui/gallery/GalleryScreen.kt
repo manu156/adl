@@ -168,7 +168,7 @@ fun FolderCard(
             ) {
                 if (download.thumbnailPath != null) {
                     AsyncImage(
-                        model = download.thumbnailPath,
+                        model = java.io.File(download.thumbnailPath),
                         contentDescription = download.galleryName,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -271,7 +271,7 @@ fun AllImagesGrid(
     ) {
         items(images, key = { "${it.id}_${it.downloadId}_${it.index}" }) { image ->
             AsyncImage(
-                model = image.filePath,
+                model = java.io.File(image.filePath),
                 contentDescription = image.fileName,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
