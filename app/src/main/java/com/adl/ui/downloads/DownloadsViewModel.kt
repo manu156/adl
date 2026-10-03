@@ -84,27 +84,7 @@ class DownloadsViewModel @Inject constructor(
             context.startService(intent)
 
             logRepository.clearLogs(download.id)
-            repository.deleteDownload(download.id)
-
-            if (deleteFiles && download.outputDir.isNotBlank()) {
-                withContext(Dispatchers.IO) {
-                    try {
-                        val dir = File(download.outputDir)
-                        if (dir.exists() && dir.isDirectory) {
-                            // Find directory matching gallery name
-                            dir.listFiles()?.forEach { file ->
-                                if (file.name.contains(download.siteName, ignoreCase = true) ||
-                                    file.name.contains(download.galleryName, ignoreCase = true)
-                                ) {
-                                    file.deleteRecursively()
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w("DownloadsViewModel", "Error deleting files: ${e.message}")
-                    }
-                }
-            }
+            repository.deleteDownload(download.id, deleteFiles = deleteFiles)
         }
     }
 }

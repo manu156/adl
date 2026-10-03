@@ -10,12 +10,10 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.adl.MainActivity
-import com.adl.data.db.DownloadEntity
 import com.adl.data.db.DownloadStatus
 import com.adl.data.repository.DownloadRepository
 import com.adl.domain.CookieExporter
 import com.adl.domain.DownloadLogRepository
-import com.adl.domain.PriorityDownloadQueue
 import com.adl.domain.SettingsRepository
 import com.chaquo.python.Python
 import dagger.hilt.android.AndroidEntryPoint
@@ -27,6 +25,7 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.ArrayDeque
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -34,7 +33,6 @@ class DownloadService : Service() {
 
     @Inject lateinit var repository: DownloadRepository
     @Inject lateinit var cookieExporter: CookieExporter
-    @Inject lateinit var priorityQueue: PriorityDownloadQueue
     @Inject lateinit var settingsRepository: SettingsRepository
     @Inject lateinit var downloadLogRepository: DownloadLogRepository
 
@@ -45,6 +43,13 @@ class DownloadService : Service() {
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     }
 
+    private data class DownloadTask(val url: String, val downloadId: Long)
+
+    private val queueLock = Any()
+    private val downloadQueue = ArrayDeque<DownloadTask>()
+    @Volatile private var currentRunningDownloadId: Long? = null
+    private var isProcessing = false
+
     companion object {
         const val ACTION_START = "com.adl.ACTION_START_DOWNLOAD"
         const val ACTION_PAUSE = "com.adl.ACTION_PAUSE_DOWNLOAD"
@@ -52,7 +57,7 @@ class DownloadService : Service() {
         const val EXTRA_URL = "extra_url"
         const val EXTRA_DOWNLOAD_ID = "extra_download_id"
         const val CHANNEL_ID = "adl_downloads"
-        const val NOTIF_ID_BASE = 1000
+        const val NOTIF_FOREGROUND_ID = 1000
         private const val TAG = "DownloadService"
 
         fun startIntent(context: Context, url: String, downloadId: Long): Intent =
@@ -87,7 +92,11 @@ class DownloadService : Service() {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
                 val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
                 if (downloadId < 0) return START_NOT_STICKY
-                serviceScope.launch { startDownload(url, downloadId) }
+
+                // Immediately start foreground notification to satisfy Android 8+ requirement
+                startForeground(NOTIF_FOREGROUND_ID, buildForegroundNotification("Queued download...", url))
+
+                enqueueDownload(url, downloadId)
             }
             ACTION_PAUSE -> {
                 val downloadId = intent.getLongExtra(EXTRA_DOWNLOAD_ID, -1L)
@@ -101,42 +110,77 @@ class DownloadService : Service() {
                 serviceScope.launch { cancelDownload(url, downloadId) }
             }
         }
-        return START_REDELIVER_INTENT
+        // Do NOT redeliver old intents on process death — state is tracked in Room DB
+        return START_NOT_STICKY
     }
 
-    private suspend fun startDownload(url: String, downloadId: Long) {
-        val notifId = NOTIF_ID_BASE + downloadId.toInt()
-        startForeground(notifId, buildNotification(downloadId, url, 0, 0))
+    private fun enqueueDownload(url: String, downloadId: Long) {
+        synchronized(queueLock) {
+            if (currentRunningDownloadId == downloadId || downloadQueue.any { it.downloadId == downloadId }) {
+                Log.d(TAG, "Download $downloadId is already running or queued")
+                return
+            }
+            downloadQueue.add(DownloadTask(url, downloadId))
+            downloadLogRepository.addLog(downloadId, "[INFO] Download added to queue (position: ${downloadQueue.size})")
 
-        downloadLogRepository.addLog(downloadId, "[INFO] Service starting download for: $url")
+            if (!isProcessing) {
+                isProcessing = true
+                serviceScope.launch { processQueue() }
+            }
+        }
+    }
+
+    private suspend fun processQueue() {
+        while (true) {
+            val nextTask = synchronized(queueLock) {
+                if (downloadQueue.isEmpty()) {
+                    isProcessing = false
+                    currentRunningDownloadId = null
+                    return@synchronized null
+                }
+                downloadQueue.removeFirst()
+            } ?: break
+
+            currentRunningDownloadId = nextTask.downloadId
+            try {
+                executeDownload(nextTask.url, nextTask.downloadId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error executing download ${nextTask.downloadId}", e)
+                downloadLogRepository.addLog(nextTask.downloadId, "[ERROR] Download failed: ${e.message}")
+                repository.updateStatus(nextTask.downloadId, DownloadStatus.FAILED)
+            } finally {
+                currentRunningDownloadId = null
+            }
+        }
+
+        // All downloads completed; remove foreground notification and shut down service
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private suspend fun executeDownload(url: String, downloadId: Long) {
+        val downloadEntity = repository.observeById(downloadId).firstOrNull()
+        val title = downloadEntity?.galleryName?.ifBlank { url } ?: url
+
+        updateForegroundNotification(title, "Starting download...", 0, 0)
+        downloadLogRepository.addLog(downloadId, "[INFO] Starting download: $url")
 
         // Update DB: mark as IN_PROGRESS
-        repository.updateProgress(downloadId, DownloadStatus.IN_PROGRESS, 0)
+        repository.updateStatus(downloadId, DownloadStatus.IN_PROGRESS)
 
         val outputDir = getExternalFilesDir(null)!!.absolutePath
-        downloadLogRepository.addLog(downloadId, "[INFO] Storage directory: $outputDir")
-
         val cookiesPath = withContext(Dispatchers.Main) {
             cookieExporter.exportForUrl(url)?.absolutePath ?: ""
         }
-        downloadLogRepository.addLog(
-            downloadId,
-            "[INFO] Cookies: ${if (cookiesPath.isNotBlank()) "Loaded ($cookiesPath)" else "None (anonymous session)"}"
-        )
 
-        // Read user config without blocking indefinitely
         val configJson = settingsRepository.galleryDlConfig.firstOrNull() ?: ""
-        val threads = settingsRepository.downloadThreads.firstOrNull() ?: 3
         val sleepStr = settingsRepository.sleepInterval.firstOrNull() ?: "0.5"
         val sleepSec = sleepStr.toDoubleOrNull() ?: 0.5
 
-        // Clear any stale cancellation flags / leftover queue events from a previous run
-        // This prevents the "stuck launching gallery-dl engine" bug after service restarts
-        downloadLogRepository.addLog(downloadId, "[INFO] Resetting download state...")
+        // Reset state for this download
         wrapper.callAttr("reset_state", downloadId.toString(), url)
 
-        // Start the Python download
-        downloadLogRepository.addLog(downloadId, "[INFO] Launching gallery-dl engine (threads: $threads, sleep: ${sleepSec}s)...")
+        // Launch single-threaded sequential gallery-dl download
         wrapper.callAttr(
             "start_download",
             url,
@@ -144,40 +188,25 @@ class DownloadService : Service() {
             downloadId.toString(),
             cookiesPath,
             configJson,
-            threads,
+            1,
             sleepSec,
         )
 
-        // Poll progress events from the Python queue
         var imageIndex = 0
         var isComplete = false
-        var lastReportedTotal = 0
-        // With parallel downloads, workers complete out-of-order so image_index values
-        // can arrive as e.g. 30→15→6. We track the max seen so downloadedImages only
-        // ever increases, not regresses to a lower value.
-        var maxDownloadedIndex = 0
-        // Also count total images received (including failed ones) for the progress bar
-        var receivedImageCount = 0
-        // Watchdog: if no event arrives within 5 minutes, treat as error to unblock the service
+        var lastReportedTotal = downloadEntity?.totalImages ?: 0
         val pollDeadlineMs = 5 * 60 * 1000L
         var lastEventMs = System.currentTimeMillis()
 
         while (!isComplete) {
-            // Update priority if gallery is being viewed
-            if (priorityQueue.isBeingViewed(downloadId)) {
-                val indices = priorityQueue.getPriorityIndicesString(downloadId)
-                wrapper.callAttr("set_priority_indices", url, indices)
-            }
-
             val eventJson = wrapper.callAttr("poll_event", 0.2)?.toString()
             if (eventJson == null) {
-                // Check watchdog timeout
                 if (System.currentTimeMillis() - lastEventMs > pollDeadlineMs) {
-                    val msg = "Download timed out — no events received for 5 minutes"
+                    val msg = "Download timed out — no events for 5 minutes"
                     Log.e(TAG, msg)
                     downloadLogRepository.addLog(downloadId, "[ERROR] $msg")
-                    repository.updateProgress(downloadId, DownloadStatus.FAILED, maxDownloadedIndex)
-                    showErrorNotification(notifId, url, msg)
+                    repository.updateStatus(downloadId, DownloadStatus.FAILED)
+                    showCompletionNotification(downloadId, title, false, "Timed out after 5 minutes")
                     isComplete = true
                 }
                 continue
@@ -207,35 +236,31 @@ class DownloadService : Service() {
                     "image" -> {
                         imageIndex = event.getInt("image_index")
                         val filepath = event.optString("filepath", "")
-                        receivedImageCount++
 
-                        // Only update the progress counter upward — parallel workers
-                        // complete out-of-order so imageIndex can go 30→15→6 etc.
-                        // Use receivedImageCount (monotonically increasing) for the bar
-                        // and maxDownloadedIndex (highest seq index seen) for display.
-                        if (imageIndex > maxDownloadedIndex) maxDownloadedIndex = imageIndex
-                        val displayCount = maxOf(receivedImageCount, maxDownloadedIndex)
-
-                        if (displayCount > lastReportedTotal && lastReportedTotal > 0) {
-                            lastReportedTotal = displayCount
-                            repository.setTotalImages(downloadId, displayCount)
+                        if (imageIndex > lastReportedTotal && lastReportedTotal > 0) {
+                            lastReportedTotal = imageIndex
+                            repository.setTotalImages(downloadId, imageIndex)
                         }
 
                         if (filepath.isNotBlank()) {
                             downloadLogRepository.addLog(downloadId, "[INFO] Saved image #$imageIndex: ${filepath.substringAfterLast('/')}")
                             repository.saveDownloadedImage(downloadId, imageIndex - 1, filepath)
-                            if (imageIndex == 1) repository.setThumbnail(downloadId, filepath)
+                            // Set thumbnail from first valid image
+                            if (imageIndex == 1 || downloadEntity?.thumbnailPath.isNullOrBlank()) {
+                                repository.setThumbnail(downloadId, filepath)
+                            }
                         }
-                        repository.updateProgress(downloadId, DownloadStatus.IN_PROGRESS, displayCount)
-                        updateNotification(notifId, downloadId, url, displayCount, lastReportedTotal)
+                        repository.updateProgress(downloadId, DownloadStatus.IN_PROGRESS, imageIndex)
+
+                        val statusText = if (lastReportedTotal > 0) "$imageIndex / $lastReportedTotal images" else "$imageIndex images"
+                        updateForegroundNotification(title, statusText, imageIndex, lastReportedTotal)
                     }
                     "complete" -> {
                         val total = event.optInt("total_images", imageIndex)
                         downloadLogRepository.addLog(downloadId, "[SUCCESS] Download complete. Total images: $total")
                         repository.updateProgress(downloadId, DownloadStatus.COMPLETED, total)
                         repository.setTotalImages(downloadId, total)
-                        repository.syncDiskImages(downloadId, outputDir)
-                        showCompletedNotification(notifId, downloadId, url, total)
+                        showCompletionNotification(downloadId, title, true, "$total images saved")
                         isComplete = true
                     }
                     "error" -> {
@@ -243,12 +268,11 @@ class DownloadService : Service() {
                         Log.e(TAG, "Download error for $url: $msg")
                         downloadLogRepository.addLog(downloadId, "[ERROR] $msg")
                         repository.updateProgress(downloadId, DownloadStatus.FAILED, imageIndex)
-                        showErrorNotification(notifId, url, msg)
+                        showCompletionNotification(downloadId, title, false, msg)
                         isComplete = true
                     }
                     "cancelled" -> {
                         downloadLogRepository.addLog(downloadId, "[WARN] Download paused / stopped")
-                        // Mark as PAUSED
                         repository.updateStatus(downloadId, DownloadStatus.PAUSED)
                         isComplete = true
                     }
@@ -257,29 +281,31 @@ class DownloadService : Service() {
                 Log.w(TAG, "Error parsing event: ${e.message}")
             }
         }
-
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
     }
 
     private suspend fun pauseDownload(downloadId: Long) {
-        wrapper.callAttr("cancel_download", downloadId.toString())
+        synchronized(queueLock) {
+            downloadQueue.removeAll { it.downloadId == downloadId }
+        }
+        if (currentRunningDownloadId == downloadId) {
+            wrapper.callAttr("cancel_download", downloadId.toString())
+        }
         repository.updateStatus(downloadId, DownloadStatus.PAUSED)
         downloadLogRepository.addLog(downloadId, "[WARN] Download paused by user")
-        val notifId = NOTIF_ID_BASE + downloadId.toInt()
-        notificationManager.cancel(notifId)
     }
 
     private suspend fun cancelDownload(url: String, downloadId: Long) {
-        if (downloadId >= 0) {
+        synchronized(queueLock) {
+            downloadQueue.removeAll { it.downloadId == downloadId }
+        }
+        if (currentRunningDownloadId == downloadId) {
             wrapper.callAttr("cancel_download", downloadId.toString())
+        } else if (url.isNotBlank()) {
+            wrapper.callAttr("cancel_download", url)
+        }
+        if (downloadId >= 0) {
             repository.updateStatus(downloadId, DownloadStatus.CANCELLED)
             downloadLogRepository.addLog(downloadId, "[WARN] Download cancelled by user")
-            val notifId = NOTIF_ID_BASE + downloadId.toInt()
-            notificationManager.cancel(notifId)
-        }
-        if (url.isNotBlank()) {
-            wrapper.callAttr("cancel_download", url)
         }
     }
 
@@ -291,58 +317,58 @@ class DownloadService : Service() {
             "ADL Downloads",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Gallery download progress"
+            description = "Gallery download progress and status"
         }
         notificationManager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(
-        downloadId: Long,
-        url: String,
-        progress: Int,
-        max: Int,
-    ) = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.stat_sys_download)
-        .setContentTitle("Downloading gallery")
-        .setContentText(url.take(60))
-        .setProgress(max, progress, max == 0)
-        .setOngoing(true)
-        .setContentIntent(
-            PendingIntent.getActivity(
-                this, 0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE,
+    private fun buildForegroundNotification(title: String, text: String): android.app.Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setOngoing(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
             )
-        )
-        .build()
+            .build()
 
-    private fun updateNotification(notifId: Int, downloadId: Long, url: String, done: Int, total: Int) {
+    private fun updateForegroundNotification(title: String, text: String, progress: Int, max: Int) {
         val notif = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Downloading gallery")
-            .setContentText("${done} images downloaded")
-            .setProgress(if (total > 0) total else 0, done, total <= 0)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setProgress(if (max > 0) max else 0, progress, max <= 0)
             .setOngoing(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
+            )
             .build()
-        notificationManager.notify(notifId, notif)
+        notificationManager.notify(NOTIF_FOREGROUND_ID, notif)
     }
 
-    private fun showCompletedNotification(notifId: Int, downloadId: Long, url: String, total: Int) {
+    private fun showCompletionNotification(downloadId: Long, title: String, success: Boolean, message: String) {
+        val notifId = (20000 + downloadId % 10000).toInt()
         val notif = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .setContentTitle("Download complete")
-            .setContentText("$total images saved")
+            .setSmallIcon(if (success) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
+            .setContentTitle(if (success) "Downloaded: $title" else "Download failed: $title")
+            .setContentText(message)
             .setAutoCancel(true)
-            .build()
-        notificationManager.notify(notifId, notif)
-    }
-
-    private fun showErrorNotification(notifId: Int, url: String, message: String) {
-        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_error)
-            .setContentTitle("Download failed")
-            .setContentText(message.take(80))
-            .setAutoCancel(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
+            )
             .build()
         notificationManager.notify(notifId, notif)
     }

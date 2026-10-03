@@ -73,7 +73,7 @@ class GalleryViewModel @Inject constructor(
 
     fun deleteGallery(downloadId: Long) {
         viewModelScope.launch {
-            repository.deleteDownload(downloadId)
+            repository.deleteDownload(downloadId, deleteFiles = true)
         }
     }
 }

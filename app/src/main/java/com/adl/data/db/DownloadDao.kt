@@ -60,6 +60,9 @@ interface DownloadDao {
     @Query("SELECT * FROM images WHERE downloadId = :downloadId ORDER BY `index` ASC")
     fun observeImages(downloadId: Long): Flow<List<ImageEntity>>
 
+    @Query("SELECT * FROM images WHERE downloadId = :downloadId")
+    suspend fun getImages(downloadId: Long): List<ImageEntity>
+
     @Query("SELECT * FROM images WHERE downloadId = :downloadId AND isDownloaded = 1 ORDER BY `index` ASC")
     fun observeDownloadedImages(downloadId: Long): Flow<List<ImageEntity>>
 

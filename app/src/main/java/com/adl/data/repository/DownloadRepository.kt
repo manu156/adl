@@ -33,7 +33,20 @@ class DownloadRepository @Inject constructor(
 
     suspend fun setThumbnail(id: Long, path: String) = dao.setThumbnail(id, path)
     suspend fun setTotalImages(id: Long, total: Int) = dao.setTotalImages(id, total)
-    suspend fun deleteDownload(id: Long) {
+    suspend fun deleteDownload(id: Long, deleteFiles: Boolean = false) {
+        if (deleteFiles) {
+            try {
+                val images = dao.getImages(id)
+                for (img in images) {
+                    if (img.filePath.isNotBlank()) {
+                        val file = java.io.File(img.filePath)
+                        if (file.exists() && file.isFile) {
+                            file.delete()
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
         dao.deleteImagesForDownload(id)
         dao.deleteById(id)
     }
@@ -72,44 +85,30 @@ class DownloadRepository @Inject constructor(
     }
 
     suspend fun syncDiskImages(downloadId: Long, outputDir: String) {
-        try {
-            val dir = java.io.File(outputDir)
-            if (!dir.exists() || !dir.isDirectory) return
-            val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "mp4")
-            val files = dir.walkTopDown()
-                .filter { it.isFile && it.extension.lowercase() in imageExtensions }
-                .sortedBy { it.lastModified() }
-                .toList()
-            if (files.isNotEmpty()) {
-                if (dao.countDownloadedImages(downloadId) == 0) {
-                    files.forEachIndexed { idx, file ->
-                        saveDownloadedImage(downloadId, idx, file.absolutePath)
-                    }
-                }
-                files.firstOrNull()?.let { firstFile ->
-                    dao.setThumbnail(downloadId, firstFile.absolutePath)
-                }
-            }
-        } catch (_: Exception) {}
+        // No-op: images are saved directly to Room DB on download
     }
 
     /**
      * Called once on app startup to fix downloads left in a broken state after
      * a service/process kill (e.g. app swiped away mid-download).
      *
-     * Only touches IN_PROGRESS entries — moves them to PAUSED with the correct
-     * count so the user can resume. COMPLETED downloads are never touched here.
+     * Only touches IN_PROGRESS entries:
+     * - If all images were already saved, marks COMPLETED.
+     * - Otherwise moves to PAUSED so the user can resume with one tap.
+     * COMPLETED downloads are never touched.
      */
     suspend fun fixStuckDownloads() {
         try {
             val allDownloads = dao.getAllDownloads()
             for (download in allDownloads) {
                 if (download.status == DownloadStatus.IN_PROGRESS) {
-                    // Count actually-saved images from the image table
                     val savedCount = dao.countDownloadedImages(download.id)
-                    // Use whichever is higher: the image table count or what the DB header says
-                    val correctCount = maxOf(savedCount, download.downloadedImages)
-                    dao.updateProgress(download.id, DownloadStatus.PAUSED, correctCount)
+                    if (download.totalImages > 0 && savedCount >= download.totalImages) {
+                        dao.updateProgress(download.id, DownloadStatus.COMPLETED, savedCount)
+                    } else {
+                        val correctCount = maxOf(savedCount, download.downloadedImages)
+                        dao.updateProgress(download.id, DownloadStatus.PAUSED, correctCount)
+                    }
                 }
             }
         } catch (_: Exception) {}
